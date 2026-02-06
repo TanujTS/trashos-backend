@@ -1,41 +1,105 @@
+import shutil
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+import uuid
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from pathlib import Path
 
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.models.submission import Submission, SubmissionStatus
-from app.schema.submission import SubmissionCreate, SubmissionUpdate, SubmissionResponse, SubmissionList
+from app.schema.submission import SubmissionCreate, SubmissionResponse, SubmissionList
+from app.utils.file_upload_validation import TEMP_DIR, validate_image_file
+from app.utils.ml_func import process_with_ml_model
 
 router = APIRouter(prefix="/submissions", tags=["Submissions"])
 
 
 @router.post("/", response_model=SubmissionResponse, status_code=status.HTTP_201_CREATED)
 def create_submission(
-    submission_data: SubmissionCreate,
+    file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):  
-    #might've to add route level auth check
-    # Create new submission linked to current user
+    """
+    Create new submission by uploading image file
+    Processes file with ML model and saves results to database
+    """
 
-    # call to ml function goes here
+    validate_image_file(file)
+    file_extension = Path(file.filename).suffix.lower()
+    unique_filename = f"{uuid.uuid4()}{file_extension}"
+    file_path = TEMP_DIR / unique_filename
+    file_url = f"/api/submissions/files/{unique_filename}"
+    
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-    #------------------------------------
-    submission = Submission(
-        user_id=current_user.id,
-        image_path_url=submission_data.image_path_url,
-        status=SubmissionStatus.PENDING
-    )
+            # create initial submission record
+            submission = Submission(
+                user_id=current_user.id,
+                image_path_url=file_url,
+                status=SubmissionStatus.PENDING
+            )
+
+            db.add(submission)
+            db.commit()
+            db.refresh(submission)
+
+            try:
+                ml_results=process_with_ml_model(str(file_path))
+
+                submission.classification = ml_results.get("classification")
+                submission.resell_value = ml_results.get("resell_value")
+                submission.co2_saved = ml_results.get("co2_saved")
+                submission.resell_places = ml_results.get("resell_places")
+                submission.model_version = ml_results.get("model_version")
+                submission.status = SubmissionStatus.CLASSIFIED
+            
+                db.commit()
+                db.refresh(submission)
+
+            except Exception as ml_error:
+                submission.status = SubmissionStatus.FAILED
+                db.commit()
+                db.refresh(submission)
+
+                print(f"ML processing failed: {ml_error}")
+
+            return submission
+        
+    except Exception as e:
+        if file_path.exists():
+            file_path.unlink()
+
+        # Rollback any database changes instead of trying to delete
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process submission: {str(e)}"
+        )
+    finally:
+        file.file.close()
+
+@router.get("/files/{filename}")
+async def get_submission_file(filename: str):
+    """Serve uploaded submission files"""
+    file_path = TEMP_DIR / filename
     
-    db.add(submission)
-    db.commit()
-    db.refresh(submission)
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
     
-    return submission
+    from fastapi.responses import FileResponse
+    return FileResponse(path=file_path)
+
 
 
 @router.get("/", response_model=SubmissionList)
@@ -81,7 +145,7 @@ def get_submission(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get a specific submission (like Express.js GET /submissions/:id)"""
+    """Get a specific submission"""
     
     submission = db.query(Submission).filter(
         Submission.id == submission_id,
@@ -102,7 +166,7 @@ def delete_submission(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Delete a submission"""
+    """Delete a submission and its associated file"""
     
     submission = db.query(Submission).filter(
         Submission.id == submission_id,
@@ -115,9 +179,18 @@ def delete_submission(
             detail="Submission not found"
         )
     
+    # Try to delete associated file
+    if submission.image_path_url and "/files/" in submission.image_path_url:
+        filename = submission.image_path_url.split("/")[-1]
+        file_path = TEMP_DIR / filename
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except Exception as e:
+                # Log the error but don't fail the deletion
+                print(f"Failed to delete file {filename}: {e}")
+    
     db.delete(submission)
     db.commit()
     
     return {"message": "Submission deleted successfully"}
-
-
