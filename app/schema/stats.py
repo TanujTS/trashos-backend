@@ -22,5 +22,3 @@ class ImpactStatsResponse(BaseModel):
     co2Averted: float
     earned: float
     treesSaved: float
-    wasteGenerated: float
-    fuelSaved: float
