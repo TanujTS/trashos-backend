@@ -45,10 +45,10 @@ def register(user_in: UserCreate, response: Response, db: Session = Depends(get_
     response.set_cookie(
         key="auth_token",
         value=access_token,
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         httponly=True,
-        secure=False,
-        samesite="lax"
+        secure=True,
+        samesite="none"
     ) # store session in cookies
     
     return user;
@@ -83,10 +83,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), response: Response =
     response.set_cookie(
         key="auth_token",
         value=access_token,
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         httponly=True,
-        secure=False,
-        samesite="lax"
+        secure=True,
+        samesite="none"
     )
     
     return user
@@ -94,7 +94,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), response: Response =
 @router.post("/logout")
 def logout(response: Response):
     """Clear cookies"""
-    response.delete_cookie(key="auth_token")
+    response.delete_cookie(key="auth_token", secure=True, samesite="none")
     return {"message": "Successfully logged out!"}
 
 
